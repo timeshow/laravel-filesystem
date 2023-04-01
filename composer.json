@@ -9,7 +9,7 @@
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "Timeshow\\LaravelFilesystem\\": "src/"
+            "Timeshow\\Filesystem\\": "src/"
         }
     },
     "authors": [

@@ -1,5 +1,5 @@
 <?php
-namespace TimeShow\LaravelFilesystem;
+namespace TimeShow\Filesystem;
 
 use Illuminate\Support\ServiceProvider;
 
