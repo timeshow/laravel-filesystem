@@ -4,6 +4,7 @@ namespace TimeShow\Filesystem;
 
 use Illuminate\Support\ServiceProvider;
 use League\Flysystem\Filesystem;
+use Illuminate\Support\Facades\Storage;
 use TimeShow\Filesystem\Oss\OssAdapter;
 
 
@@ -51,7 +52,7 @@ class FilesystemServiceProvider extends ServiceProvider
      */
     protected function extendOssStorage()
     {
-        \Storage::extend('oss', function($app, $config){
+        Storage::extend('oss', function($app, $config){
             return new Filesystem(new OssAdapter($config), $config);
         });
     }
