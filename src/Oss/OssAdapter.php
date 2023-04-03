@@ -1,484 +1,673 @@
 <?php
 namespace TimeShow\Filesystem\Oss;
 
-use League\Flysystem\Adapter\AbstractAdapter;
+use Illuminate\Filesystem\FilesystemAdapter;
 use League\Flysystem\Config;
+use TimeShow\Filesystem\Oss\Traits\SignatureTrait;
 
-class OssAdapter extends AbstractAdapter
+class OssAdapter extends FilesystemAdapter
 {
+    use SignatureTrait;
 
-    const FILE_TYPE_FILE    = 'file';//类型是文件
-    const FILE_TYPE_DIR     = 'dir';//类型是文件夹
+    // 系统参数
+
+    const SYSTEM_FIELD = [
+        'bucket' => '${bucket}',
+        'etag' => '${etag}',
+        'filename' => '${object}',
+        'size' => '${size}',
+        'mimeType' => '${mimeType}',
+        'height' => '${imageInfo.height}',
+        'width' => '${imageInfo.width}',
+        'format' => '${imageInfo.format}',
+    ];
 
     /**
-     * 配置信息
      * @var
      */
-    protected $config;
+    protected $accessKeyId;
 
     /**
-     * oss client 上传对象
-     * @var OssClient
+     * @var
      */
-    protected $upload;
+    protected $accessKeySecret;
 
     /**
-     * bucket
-     * @var string
+     * @var
+     */
+    protected $endpoint;
+
+    /**
+     * @var
      */
     protected $bucket;
 
     /**
-     * 构造方法
-     * @param array $config   配置信息
+     * @var
      */
-    public function __construct($config)
+    protected $isCName;
+
+    /**
+     * @var array
+     */
+    protected $buckets;
+
+    /**
+     * @var OssClient
+     */
+    protected $client;
+
+    /**
+     * @var array|mixed[]
+     */
+    protected $params;
+
+    /**
+     * @var bool
+     */
+    protected $useSSL = false;
+
+    /**
+     * @var string|null
+     */
+    protected $cdnUrl = null;
+
+    /**
+     * @var PathPrefixer
+     */
+    protected $prefixer;
+
+    /**
+     * @param $accessKeyId
+     * @param $accessKeySecret
+     * @param $endpoint
+     * @param $bucket
+     * @param ...$params
+     *
+     * @throws OssException
+     */
+    public function __construct($accessKeyId, $accessKeySecret, $endpoint, $bucket, bool $isCName = false, string $prefix = '', array $buckets = [], ...$params)
     {
-        $this->config   = $config;
-        $this->bucket   = $this->config['bucket'];
-        //设置路径前缀
-        $this->setPathPrefix($this->config['transport'] . '://' . $this->config['bucket'] . '.' .  $this->config['endpoint']);
+        $this->accessKeyId = $accessKeyId;
+        $this->accessKeySecret = $accessKeySecret;
+        $this->endpoint = $endpoint;
+        $this->bucket = $bucket;
+        $this->isCName = $isCName;
+        $this->prefixer = new PathPrefixer($prefix, DIRECTORY_SEPARATOR);
+        $this->buckets = $buckets;
+        $this->params = $params;
+        $this->initClient();
+        $this->checkEndpoint();
     }
 
     /**
-     * 格式化路径
+     * 设置cdn的url.
+     */
+    public function setCdnUrl(?string $url)
+    {
+        $this->cdnUrl = $url;
+    }
+
+    public function ossKernel(): OssClient
+    {
+        return $this->getClient();
+    }
+
+    /**
+     * 调用不同的桶配置.
+     *
+     * @param $bucket
+     *
+     * @return $this
+     *
+     * @throws OssException
+     * @throws \Exception
+     */
+    public function bucket($bucket): OssAdapter
+    {
+        if (!isset($this->buckets[$bucket])) {
+            throw new \Exception('bucket is not exist.');
+        }
+        $bucketConfig = $this->buckets[$bucket];
+
+        $this->accessKeyId = $bucketConfig['access_key'];
+        $this->accessKeySecret = $bucketConfig['secret_key'];
+        $this->endpoint = $bucketConfig['endpoint'];
+        $this->bucket = $bucketConfig['bucket'];
+        $this->isCName = $bucketConfig['isCName'];
+
+        $this->initClient();
+        $this->checkEndpoint();
+
+        return $this;
+    }
+
+    /**
+     * init oss client.
+     *
+     * @throws OssException
+     */
+    protected function initClient()
+    {
+        $this->client = new OssClient($this->accessKeyId, $this->accessKeySecret, $this->endpoint, $this->isCName, ...$this->params);
+    }
+
+    /**
+     * get ali sdk kernel class.
+     */
+    public function getClient(): OssClient
+    {
+        return $this->client;
+    }
+
+    /**
+     * 验签.
+     */
+    public function verify(): array
+    {
+        // oss 前面header、公钥 header
+        $authorizationBase64 = '';
+        $pubKeyUrlBase64 = '';
+
+        if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+            $authorizationBase64 = $_SERVER['HTTP_AUTHORIZATION'];
+        }
+
+        if (isset($_SERVER['HTTP_X_OSS_PUB_KEY_URL'])) {
+            $pubKeyUrlBase64 = $_SERVER['HTTP_X_OSS_PUB_KEY_URL'];
+        }
+
+        // 验证失败
+        if ('' == $authorizationBase64 || '' == $pubKeyUrlBase64) {
+            return [false, ['CallbackFailed' => 'authorization or pubKeyUrl is null']];
+        }
+
+        // 获取OSS的签名
+        $authorization = base64_decode($authorizationBase64);
+        // 获取公钥
+        $pubKeyUrl = base64_decode($pubKeyUrlBase64);
+        // 请求验证
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $pubKeyUrl);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+        $pubKey = curl_exec($ch);
+
+        if ('' == $pubKey) {
+            return [false, ['CallbackFailed' => 'curl is fail']];
+        }
+
+        // 获取回调 body
+        $body = file_get_contents('php://input');
+        // 拼接待签名字符串
+        $path = $_SERVER['REQUEST_URI'];
+        $pos = strpos($path, '?');
+        if (false === $pos) {
+            $authStr = urldecode($path)."\n".$body;
+        } else {
+            $authStr = urldecode(substr($path, 0, $pos)).substr($path, $pos, strlen($path) - $pos)."\n".$body;
+        }
+        // 验证签名
+        $ok = openssl_verify($authStr, $authorization, $pubKey, OPENSSL_ALGO_MD5);
+
+        if (1 !== $ok) {
+            return [false, ['CallbackFailed' => 'verify is fail, Illegal data']];
+        }
+
+        parse_str($body, $data);
+
+        return [true, $data];
+    }
+
+    /**
+     * oss 直传配置.
+     *
+     * @param null $callBackUrl
+     *
+     * @return false|string
+     *
+     * @throws \Exception
+     */
+    public function signatureConfig(string $prefix = '', $callBackUrl = null, array $customData = [], int $expire = 30, int $contentLengthRangeValue = 1048576000, array $systemData = [])
+    {
+        $prefix = $this->prefixer->prefixPath($prefix);
+
+        // 系统参数
+        $system = [];
+        if (empty($systemData)) {
+            $system = self::SYSTEM_FIELD;
+        } else {
+            foreach ($systemData as $key => $value) {
+                if (!in_array($value, self::SYSTEM_FIELD)) {
+                    throw new \InvalidArgumentException("Invalid oss system filed: ${value}");
+                }
+                $system[$key] = $value;
+            }
+        }
+
+        // 自定义参数
+        $callbackVar = [];
+        $data = [];
+        if (!empty($customData)) {
+            foreach ($customData as $key => $value) {
+                $callbackVar['x:'.$key] = $value;
+                $data[$key] = '${x:'.$key.'}';
+            }
+        }
+
+        $callbackParam = [
+            'callbackUrl' => $callBackUrl,
+            'callbackBody' => urldecode(http_build_query(array_merge($system, $data))),
+            'callbackBodyType' => 'application/x-www-form-urlencoded',
+        ];
+        $callbackString = json_encode($callbackParam);
+        $base64CallbackBody = base64_encode($callbackString);
+
+        $now = time();
+        $end = $now + $expire;
+        $expiration = $this->gmt_iso8601($end);
+
+        // 最大文件大小.用户可以自己设置
+        $condition = [
+            0 => 'content-length-range',
+            1 => 0,
+            2 => $contentLengthRangeValue,
+        ];
+        $conditions[] = $condition;
+
+        $start = [
+            0 => 'starts-with',
+            1 => '$key',
+            2 => $prefix,
+        ];
+        $conditions[] = $start;
+
+        $arr = [
+            'expiration' => $expiration,
+            'conditions' => $conditions,
+        ];
+        $policy = json_encode($arr);
+        $base64Policy = base64_encode($policy);
+        $stringToSign = $base64Policy;
+        $signature = base64_encode(hash_hmac('sha1', $stringToSign, $this->accessKeySecret, true));
+
+        $response = [];
+        $response['accessid'] = $this->accessKeyId;
+        $response['host'] = $this->normalizeHost();
+        $response['policy'] = $base64Policy;
+        $response['signature'] = $signature;
+        $response['expire'] = $end;
+        $response['callback'] = $base64CallbackBody;
+        $response['callback-var'] = $callbackVar;
+        $response['dir'] = $prefix;  // 这个参数是设置用户上传文件时指定的前缀。
+
+        return json_encode($response);
+    }
+
+    /**
+     * sign url.
+     *
      * @param $path
-     * @return string
+     * @param $timeout
+     *
+     * @return false|\OSS\Http\ResponseCore|string
      */
-    protected static function normalizerPath($path, $is_dir = false)
+    public function getTemporaryUrl($path, $timeout, array $options = [], string $method = OssClient::OSS_HTTP_GET)
     {
-        $path = ltrim(PathLibrary::normalizerPath($path, $is_dir), '/');
+        $path = $this->prefixer->prefixPath($path);
 
-        return $path == '/' ? '' : $path;
-    }
-
-    /**
-     * 获得OSS client上传对象
-     * @return \OSS\OssClient
-     */
-    protected function getOss()
-    {
-        if (!$this->upload) {
-            $this->upload = new OssClient(
-                $this->config['accessKeyId'],
-                $this->config['accessKeySecret'],
-                $this->config['endpoint'],
-                $this->config['isCName'],
-                $this->config['securityToken']
-            );
-
-            //设置请求超时时间
-            $this->upload->setTimeout($this->config['timeout']);
-
-            //设置连接超时时间
-            $this->upload->setConnectTimeout($this->config['connectTimeout']);
-        }
-
-        return $this->upload;
-    }
-
-    /**
-     * 获得 Oss 实例
-     * @return OssClient
-     */
-    public function getInstance()
-    {
-        return $this->getOss();
-    }
-
-    /**
-     * 判断文件是否存在
-     * @param string $path
-     * @return bool
-     */
-    public function has($path)
-    {
         try {
-            return $this->getOss()->doesObjectExist($this->bucket, $path) != false ? true : false;
-        }catch (OssException $e){
-
+            $path = $this->client->signUrl($this->bucket, $path, $timeout, $method, $options);
+        } catch (OssException $exception) {
+            return false;
         }
-        return false;
+
+        return $path;
     }
 
-    /**
-     * 读取文件
-     * @param $file_name
-     */
-    public function read($path)
+    public function write(string $path, string $contents, Config $config): void
     {
+        $path = $this->prefixer->prefixPath($path);
+        $options = $config->get('options', []);
+
         try {
-            return ['contents' => $this->getOss()->getObject($this->bucket, static::normalizerPath($path)) ];
-        }catch (OssException $e){
-
+            $this->client->putObject($this->bucket, $path, $contents, $options);
+        } catch (\Exception $exception) {
+            throw UnableToWriteFile::atLocation($path, $exception->getMessage());
         }
-        return false;
-
     }
 
     /**
-     * 获得文件流
-     * @param string $path
-     * @return array|bool
-     */
-    public function readStream($path)
-    {
-        try {
-            //获得一个临时文件
-            $tmpfname       = FileFunction::getTmpFile();
-
-            file_put_contents($tmpfname, $this->read($path)['contents'] );
-
-            $handle         = fopen($tmpfname, 'r');
-
-            //删除临时文件
-            FileFunction::deleteTmpFile($tmpfname);
-
-            return ['stream' => $handle];
-        }catch (OssException $e){
-
-        }
-
-        return false;
-    }
-
-    /**
-     * 写入文件
-     * @param $file_name
+     * Write a new file using a stream.
+     *
      * @param $contents
      */
-    public function write($path, $contents, Config $config)
+    public function writeStream(string $path, $contents, Config $config): void
+    {
+        $path = $this->prefixer->prefixPath($path);
+        $options = $config->get('options', []);
+
+        try {
+            $this->client->uploadStream($this->bucket, $this->prefixer->prefixPath($path), $contents, $options);
+        } catch (OssException $exception) {
+            throw UnableToWriteFile::atLocation($path, $exception->getErrorCode(), $exception);
+        }
+    }
+
+    public function move(string $source, string $destination, Config $config): void
     {
         try {
-            $this->getOss()->putObject($this->bucket, $path, $contents, $option = []);
-
-            return true;
-        }catch (OssException $e){
-
+            $this->copy($source, $destination, $config);
+            $this->delete($source);
+        } catch (\Exception $exception) {
+            throw UnableToMoveFile::fromLocationTo($source, $destination);
         }
-        return false;
     }
 
-    /**
-     * 写入文件流
-     * @param string $path
-     * @param resource $resource
-     * @param array $config
-     */
-    public function writeStream($path, $resource, Config $config)
+    public function copy(string $source, string $destination, Config $config): void
     {
-        try{
-            //获得一个临时文件
-            $tmpfname       = FileFunction::getTmpFile();
+        $path = $this->prefixer->prefixPath($source);
+        $newPath = $this->prefixer->prefixPath($destination);
 
-            file_put_contents($tmpfname, $resource);
-
-            $this->getOss()->uploadFile($this->bucket, $path, $tmpfname, $option = []);
-
-            //删除临时文件
-            FileFunction::deleteTmpFile($tmpfname);
-
-            return true;
+        try {
+            $this->client->copyObject($this->bucket, $path, $this->bucket, $newPath);
+        } catch (OssException $exception) {
+            throw UnableToCopyFile::fromLocationTo($source, $destination);
         }
-        catch (OssException $e){
+    }
 
+    /**
+     * delete a file.
+     */
+    public function delete(string $path): void
+    {
+        $path = $this->prefixer->prefixPath($path);
+
+        try {
+            $this->client->deleteObject($this->bucket, $path);
+        } catch (OssException $ossException) {
+            throw UnableToDeleteFile::atLocation($path);
         }
-        return false;
     }
 
     /**
-     * 更新文件
-     * @param string $path
-     * @param string $contents
-     * @param array $config
+     * @throws OssException
      */
-    public function update($path, $contents, Config $config)
+    public function deleteDirectory(string $path): void
     {
-        return $this->write($path, $contents, $config);
-    }
-
-    /**
-     * 更新文件流
-     * @param string $path
-     * @param resource $resource
-     * @param array $config
-     */
-    public function updateStream($path, $resource, Config $config)
-    {
-        return $this->writeStream($path, $resource, $config);
-    }
-
-    /**
-     * 列出目录文件
-     * @param string $directory
-     * @param bool|false $recursive
-     * @return array
-     */
-    public function listContents($directory = '', $recursive = false)
-    {
-        try{
-            $directory = static::normalizerPath($directory, true);
-
-            $options = [
-                'delimiter' => '/' ,
-                'prefix'    => $directory,
-                'max-keys'  => $this->config['max_keys'],
-                'marker'    => '',
-            ];
-
-            $result_obj = $this->getOss()->listObjects($this->bucket, $options);
-
-            $file_list  = $result_obj->getObjectList();//文件列表
-            $dir_list   = $result_obj->getPrefixList();//文件夹列表
-            $data       = [];
-
-            if (is_array($dir_list) && count($dir_list) > 0 ) {
-                foreach ($dir_list as $key => $dir) {
-                    $data[] = [
-                        'path'      => $dir->getPrefix(),
-                        'prefix'    => $options['prefix'],
-                        'marker'    => $options['marker'],
-                        'file_type' => self::FILE_TYPE_DIR
-                    ];
+        try {
+            $contents = $this->listContents($path, false);
+            $files = [];
+            foreach ($contents as $i => $content) {
+                if ($content instanceof DirectoryAttributes) {
+                    $this->deleteDirectory($content->path());
+                    continue;
+                }
+                $files[] = $this->prefixer->prefixPath($content->path());
+                if ($i && 0 == $i % 100) {
+                    $this->client->deleteObjects($this->bucket, $files);
+                    $files = [];
                 }
             }
+            !empty($files) && $this->client->deleteObjects($this->bucket, $files);
+            $this->client->deleteObject($this->bucket, $this->prefixer->prefixDirectoryPath($path));
+        } catch (OssException $exception) {
+            throw UnableToDeleteDirectory::atLocation($path, $exception->getErrorCode(), $exception);
+        }
+    }
 
-            if (is_array($file_list) && count($file_list) > 0 ) {
-                foreach ($file_list as $key => $file) {
-                    if ($key == 0 ) {
-                        $data[] = [
-                            'path'      => $file->getKey(),
-                            'prefix'    => $options['prefix'],
-                            'marker'    => $options['marker'],
-                            'file_type' => self::FILE_TYPE_DIR
-                        ];
-                    } else {
-                        $data[] = [
-                            'path'              => $file->getKey(),
-                            'last_modified'     => $file->getLastModified(),
-                            'e_tag'             => $file->getETag(),
-                            'file_size'         => $file->getSize(),
-                            'prefix'            => $options['prefix'],
-                            'marker'            => $options['marker'],
-                            'file_type'         => self::FILE_TYPE_FILE,
-                        ];
+    public function createDirectory(string $path, Config $config): void
+    {
+        try {
+            $this->client->createObjectDir($this->bucket, $this->prefixer->prefixPath($path));
+        } catch (OssException $exception) {
+            throw UnableToCreateDirectory::dueToFailure($path, $exception);
+        }
+    }
+
+    /**
+     * visibility.
+     *
+     * @return array|bool|false
+     */
+    public function setVisibility(string $path, string $visibility): void
+    {
+        $object = $this->prefixer->prefixPath($path);
+
+        $acl = Visibility::PUBLIC === $visibility ? OssClient::OSS_ACL_TYPE_PUBLIC_READ : OssClient::OSS_ACL_TYPE_PRIVATE;
+
+        try {
+            $this->client->putObjectAcl($this->bucket, $object, $acl);
+        } catch (OssException $exception) {
+            throw UnableToSetVisibility::atLocation($path, $exception->getMessage());
+        }
+    }
+
+    public function visibility(string $path): FileAttributes
+    {
+        try {
+            $acl = $this->client->getObjectAcl($this->bucket, $this->prefixer->prefixPath($path), []);
+        } catch (OssException $exception) {
+            throw UnableToRetrieveMetadata::visibility($path, $exception->getMessage());
+        }
+
+        return new FileAttributes($path, null, OssClient::OSS_ACL_TYPE_PRIVATE === $acl ? Visibility::PRIVATE : Visibility::PUBLIC);
+    }
+
+    /**
+     * Check whether a file exists.
+     *
+     * @return array|bool|null
+     */
+    public function fileExists(string $path): bool
+    {
+        $path = $this->prefixer->prefixPath($path);
+
+        return $this->client->doesObjectExist($this->bucket, $path);
+    }
+
+    public function directoryExists(string $path): bool
+    {
+        return $this->client->doesObjectExist($this->bucket, $this->prefixer->prefixDirectoryPath($path));
+    }
+
+    /**
+     * Get resource url.
+     */
+    public function getUrl(string $path): string
+    {
+        $path = $this->prefixer->prefixPath($path);
+
+        if (!is_null($this->cdnUrl)) {
+            return rtrim($this->cdnUrl, '/').'/'.ltrim($path, '/');
+        }
+
+        return $this->normalizeHost().ltrim($path, '/');
+    }
+
+    /**
+     * read a file.
+     */
+    public function read(string $path): string
+    {
+        $path = $this->prefixer->prefixPath($path);
+
+        try {
+            return $this->client->getObject($this->bucket, $path);
+        } catch (\Exception $exception) {
+            throw UnableToReadFile::fromLocation($path, $exception->getMessage());
+        }
+    }
+
+    /**
+     * read a file stream.
+     *
+     * @return array|bool|false
+     */
+    public function readStream(string $path)
+    {
+        $stream = fopen('php://temp', 'w+b');
+
+        try {
+            fwrite($stream, $this->client->getObject($this->bucket, $path, [OssClient::OSS_FILE_DOWNLOAD => $stream]));
+        } catch (OssException $exception) {
+            fclose($stream);
+            throw UnableToReadFile::fromLocation($path, $exception->getMessage());
+        }
+        rewind($stream);
+
+        return $stream;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function listContents(string $path, bool $deep): iterable
+    {
+        $directory = $this->prefixer->prefixDirectoryPath($path);
+        $nextMarker = '';
+        while (true) {
+            $options = [
+                OssClient::OSS_PREFIX => $directory,
+                OssClient::OSS_MARKER => $nextMarker,
+            ];
+
+            try {
+                $listObjectInfo = $this->client->listObjects($this->bucket, $options);
+                $nextMarker = $listObjectInfo->getNextMarker();
+            } catch (OssException $exception) {
+                throw new \Exception($exception->getErrorMessage(), 0, $exception);
+            }
+
+            $prefixList = $listObjectInfo->getPrefixList();
+            foreach ($prefixList as $prefixInfo) {
+                $subPath = $this->prefixer->stripDirectoryPrefix($prefixInfo->getPrefix());
+                if ($subPath == $path) {
+                    continue;
+                }
+                yield new DirectoryAttributes($subPath);
+                if (true === $deep) {
+                    $contents = $this->listContents($subPath, $deep);
+                    foreach ($contents as $content) {
+                        yield $content;
                     }
                 }
             }
 
-            return $data;
-        }catch (Exception $e){
-
-        }
-        return [];
-    }
-
-    /**
-     * 获取资源的元信息，但不返回文件内容
-     * @param $path
-     * @return array|bool
-     */
-    public function getMetadata($path)
-    {
-        try {
-            $file_info = $this->getOss()->getObjectMeta($this->bucket, $path);
-            if ( !empty($file_info) ) {
-                return $file_info;
-            }
-        }catch (OssException $e) {
-
-        }
-        return false;
-    }
-
-    /**
-     * 获得文件大小
-     * @param string $path
-     * @return array
-     */
-    public function getSize($path)
-    {
-        $file_info = $this->getMetadata($path);
-        return $file_info != false && $file_info['content-length'] > 0 ? [ 'size' => $file_info['content-length'] ] : ['size' => 0];
-    }
-
-    /**
-     * 获得文件Mime类型
-     * @param string $path
-     * @return mixed string|null
-     */
-    public function getMimetype($path)
-    {
-        $file_info = $this->getMetadata($path);
-        return $file_info != false && !empty($file_info['content-type']) ? [ 'mimetype' => $file_info['content-type'] ] : false;
-    }
-
-    /**
-     * 获得文件最后修改时间
-     * @param string $path
-     * @return array 时间戳
-     */
-    public function getTimestamp($path)
-    {
-        $file_info = $this->getMetadata($path);
-        return $file_info != false && !empty($file_info['last-modified'])
-            ? ['timestamp' => strtotime($file_info['last-modified']) ]
-            : ['timestamp' => 0 ];
-    }
-
-    /**
-     * 获得文件模式 (未实现)
-     * @param string $path
-     */
-    public function getVisibility($path)
-    {
-        return self::VISIBILITY_PUBLIC;
-    }
-
-    /**
-     * 重命名文件
-     * @param $oldname
-     * @param $newname
-     * @return boolean
-     */
-    public function rename($path, $newpath)
-    {
-        try {
-            /**
-             * 如果是一个资源，请保持最后不是以“/”结尾！
-             *
-             */
-            $path = static::normalizerPath($path);
-
-            $this->getOss()->copyObject($this->bucket, $path, $this->bucket, static::normalizerPath($newpath), []);
-            $this->delete($path);
-            return true;
-        }catch (OssException $e){
-
-        }
-        return false;
-    }
-
-    /**
-     * 复制文件
-     * @param $path
-     * @param $newpath
-     * @return boolean
-     */
-    public function copy($path, $newpath)
-    {
-        try {
-            $this->getOss()->copyObject($this->bucket, $path, $this->bucket, static::normalizerPath($newpath), []);
-            return true;
-        }catch (OssException $e){
-
-        }
-        return false;
-    }
-
-    /**
-     * 删除文件或者文件夹
-     * @param $path
-     */
-    public function delete($path)
-    {
-        try{
-            $this->getOss()->deleteObject($this->bucket, $path);
-            return true;
-        }catch (OssException $e){
-
-        }
-        return false;
-    }
-
-    /**
-     * 删除文件夹
-     * @param string $path
-     * @return mixed
-     */
-    public function deleteDir($path)
-    {
-        try{
-            //递归去删除全部文件
-            $this->recursiveDelete($path);
-
-            return true;
-        }catch (OssException $e){
-
-        }
-        return false;
-    }
-
-    /**
-     * 递归删除全部文件
-     * @param $path
-     */
-    protected function recursiveDelete($path)
-    {
-        $file_list = $this->listContents($path);
-
-        // 如果当前文件夹文件不为空,则直接去删除文件夹
-        if ( is_array($file_list) && count($file_list) > 0 ) {
-            foreach ($file_list as $file) {
-                if ($file['path'] == $path) {
-                    continue;
-                }
-                if ($file['file_type'] == self::FILE_TYPE_FILE) {
-                    $this->delete($file['path']);
-                } else {
-                    $this->recursiveDelete($file['path']);
+            $listObject = $listObjectInfo->getObjectList();
+            if (!empty($listObject)) {
+                foreach ($listObject as $objectInfo) {
+                    $objectPath = $this->prefixer->stripPrefix($objectInfo->getKey());
+                    $objectLastModified = strtotime($objectInfo->getLastModified());
+                    if ('/' == substr($objectPath, -1, 1)) {
+                        continue;
+                    }
+                    yield new FileAttributes($objectPath, $objectInfo->getSize(), null, $objectLastModified);
                 }
             }
+
+            if ('true' !== $listObjectInfo->getIsTruncated()) {
+                break;
+            }
         }
-
-        $this->getOss()->deleteObject($this->bucket, $path);
     }
 
     /**
-     * 创建文件夹
-     * @param string $dirname
-     * @param array $config
+     * @param $path
      */
-    public function createDir($dirname, Config $config)
-    {
-        try{
-            $this->getOss()->createObjectDir($this->bucket, static::normalizerPath($dirname, true));
-            return true;
-        }catch (OssException $e){
-
-        }
-        return false;
-    }
-
-    /**
-     * 设置文件模式 (未实现)
-     * @param string $path
-     * @param string $visibility
-     * @return bool
-     */
-    public function setVisibility($path, $visibility)
-    {
-        return true;
-    }
-
-    /**
-     * 获取当前文件的URL访问路径
-     * @param  string $file 文件名
-     * @param  integer $expire_at 有效期，单位：秒
-     * @return string
-     */
-    public function getUrl($file, $expire_at = 3600)
+    public function getMetadata($path): FileAttributes
     {
         try {
-            $accessUrl = $this->getOss()->signUrl($this->bucket, $file, $expire_at);
-        } catch (OssException $e) {
-            return false;
+            $result = $this->client->getObjectMeta($this->bucket, $this->prefixer->prefixPath($path));
+        } catch (OssException $exception) {
+            throw UnableToRetrieveMetadata::create($path, 'metadata', $exception->getErrorCode(), $exception);
         }
 
-        return $accessUrl;
+        $size = isset($result['content-length']) ? intval($result['content-length']) : 0;
+        $timestamp = isset($result['last-modified']) ? strtotime($result['last-modified']) : 0;
+        $mimetype = $result['content-type'] ?? '';
+
+        return new FileAttributes($path, $size, null, $timestamp, $mimetype);
     }
 
+    /**
+     * get the size of file.
+     *
+     * @return array|false
+     */
+    public function fileSize(string $path): FileAttributes
+    {
+        $meta = $this->getMetadata($path);
+        if (null === $meta->fileSize()) {
+            throw UnableToRetrieveMetadata::fileSize($path);
+        }
 
+        return $meta;
+    }
+
+    /**
+     * get mime type.
+     *
+     * @return array|false
+     */
+    public function mimeType(string $path): FileAttributes
+    {
+        $meta = $this->getMetadata($path);
+        if (null === $meta->mimeType()) {
+            throw UnableToRetrieveMetadata::mimeType($path);
+        }
+
+        return $meta;
+    }
+
+    /**
+     * get timestamp.
+     *
+     * @return array|false
+     */
+    public function lastModified(string $path): FileAttributes
+    {
+        $meta = $this->getMetadata($path);
+        if (null === $meta->lastModified()) {
+            throw UnableToRetrieveMetadata::lastModified($path);
+        }
+
+        return $meta;
+    }
+
+    /**
+     * normalize Host.
+     */
+    protected function normalizeHost(): string
+    {
+        if ($this->isCName) {
+            $domain = $this->endpoint;
+        } else {
+            $domain = $this->bucket.'.'.$this->endpoint;
+        }
+
+        if ($this->useSSL) {
+            $domain = "https://{$domain}";
+        } else {
+            $domain = "http://{$domain}";
+        }
+
+        return rtrim($domain, '/').'/';
+    }
+
+    /**
+     * Check the endpoint to see if SSL can be used.
+     */
+    protected function checkEndpoint()
+    {
+        if (0 === strpos($this->endpoint, 'http://')) {
+            $this->endpoint = substr($this->endpoint, strlen('http://'));
+            $this->useSSL = false;
+        } elseif (0 === strpos($this->endpoint, 'https://')) {
+            $this->endpoint = substr($this->endpoint, strlen('https://'));
+            $this->useSSL = true;
+        }
+    }
 
 
 }
