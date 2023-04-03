@@ -1,5 +1,6 @@
 <?php
-namespace TimeShow\Filesystem;
+declare(strict_types=1);
+namespace Timeshow\Filesystem;
 
 use Illuminate\Support\ServiceProvider;
 
