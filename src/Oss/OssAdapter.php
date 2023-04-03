@@ -1,11 +1,26 @@
 <?php
 namespace TimeShow\Filesystem\Oss;
 
-use Illuminate\Filesystem\FilesystemAdapter;
-use League\Flysystem\Config;
 use TimeShow\Filesystem\Oss\Traits\SignatureTrait;
+use OSS\Core\OssException;
+use OSS\OssClient;
+use League\Flysystem\Config;
+use League\Flysystem\DirectoryAttributes;
+use League\Flysystem\PathPrefixer;
+use League\Flysystem\Visibility;
+use League\Flysystem\FileAttributes;
+use League\Flysystem\FilesystemAdapter;
+use League\Flysystem\UnableToCopyFile;
+use League\Flysystem\UnableToCreateDirectory;
+use League\Flysystem\UnableToDeleteDirectory;
+use League\Flysystem\UnableToDeleteFile;
+use League\Flysystem\UnableToMoveFile;
+use League\Flysystem\UnableToReadFile;
+use League\Flysystem\UnableToRetrieveMetadata;
+use League\Flysystem\UnableToSetVisibility;
+use League\Flysystem\UnableToWriteFile;
 
-class OssAdapter extends FilesystemAdapter
+class OssAdapter implements FilesystemAdapter
 {
     use SignatureTrait;
 
