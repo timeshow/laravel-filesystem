@@ -1,8 +1,11 @@
 <?php
 declare(strict_types=1);
-namespace Timeshow\Filesystem;
+namespace TimeShow\Filesystem;
 
 use Illuminate\Support\ServiceProvider;
+use League\Flysystem\Filesystem;
+use TimeShow\Filesystem\Oss\OssAdapter;
+
 
 class FilesystemServiceProvider extends ServiceProvider
 {
@@ -20,6 +23,9 @@ class FilesystemServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // 实现 oss 文件系统
+        $this->extendOssStorage();
+
         self::$packagePath = __DIR__;
 
         $this->publishes(
@@ -39,4 +45,15 @@ class FilesystemServiceProvider extends ServiceProvider
     {
 
     }
+
+    /**
+     * 实现 Oss 文件系统
+     */
+    protected function extendOssStorage()
+    {
+        \Storage::extend('oss', function($app, $config){
+            return new Filesystem(new OssAdapter($config), $config);
+        });
+    }
+
 }

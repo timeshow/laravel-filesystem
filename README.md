@@ -17,7 +17,7 @@ $ composer require timeshow/laravel-filesystem
 If you want to use the repository generator through the `make:repository` Artisan command, add the `RepositoryServiceProvider` to your `config/app.php`:
 
 ``` php
-TimeShow\LaravelFilesystem\FilesystemServiceProvider::class,
+TimeShow\Filesystem\FilesystemServiceProvider::class,
 ```
 
 Publish the repostory configuration file.

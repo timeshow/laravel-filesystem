@@ -9,7 +9,7 @@
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "Timeshow\\Filesystem\\": "src/"
+            "TimeShow\\Filesystem\\": "src/"
         }
     },
     "authors": [
