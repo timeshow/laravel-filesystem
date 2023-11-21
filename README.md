@@ -3,9 +3,10 @@
 
 ## Version Compatibility
 
-Laravel      | Package
-:-------------|:--------
-9.0     | last version
+| Laravel | Package      |
+|:--------|:-------------|
+| 9.0     | 0.2.0        |
+| 10.0    | last version |
 
 
 ## Require
@@ -170,4 +171,162 @@ $adapter->signatureConfig($prefix = '/', $callBackUrl = '', $customData = [], $e
 ```
 
 ## Callback Verification
+当设置了直传回调后，可以通过验签插件，验证并获取 oss 传回的数据 文档
+注意事项：
 
+如果没有 Authorization 头信息导致验签失败需要先在 apache 或者 nginx 中设置 rewrite
+以 apache 为例，修改 httpd.conf 在 DirectoryIndex index.php 这行下面增加「RewriteEngine On」「RewriteRule .* - [env=HTTP_AUTHORIZATION:%{HTTP:Authorization},last]」
+```angular2html
+list($verify, $data) = $adapter->verify();
+// [$verify, $data] = $flysystem->verify(); // php 7.1 +
+
+if (!$verify) {
+    // 验证失败处理，此时 $data 为验签失败提示信息
+}
+
+// 注意一定要返回 json 格式的字符串，因为 oss 服务器只接收 json 格式，否则给前端报 CallbackFailed
+header("Content-Type: application/json");
+echo  json_encode($data);
+```
+直传回调验签后返回给前端的数据「包括自定义参数」，例如
+```angular2html
+{
+    "bucket": "your-bucket",
+    "etag": "D8E8FCA2DC0F896FD7CB4CB0031BA249",
+    "filename": "user/15854050909488182.png",
+    "size": "56039",
+    "mimeType": "image/png",
+    "height": "473",
+    "width": "470",
+    "format": "png",
+    "custom_name": "zhangsan",
+    "custom_age": "24"
+}
+```
+
+## 前端直传组件分享「vue + element」
+```angular2html
+<template>
+  <div>
+    <el-upload
+      class="avatar-uploader"
+      :action="uploadUrl"
+      :on-success="handleSucess"
+      :on-change="handleChange"
+      :before-upload="handleBeforeUpload"
+      :show-file-list="false"
+      :data="data"
+      :on-error="handleError"
+      :file-list="files"
+    >
+      <img v-if="dialogImageUrl" :src="dialogImageUrl" class="avatar">
+      <i v-else class="el-icon-plus avatar-uploader-icon" />
+    </el-upload>
+  </div>
+</template>
+
+<script>
+import { getOssPolicy } from '@/api/oss' // 这里就是获取直传配置接口
+
+export default {
+  name: 'Upload',
+  props: {
+    url: {
+      type: String,
+      default: null
+    }
+  },
+  data() {
+    return {
+      uploadUrl: '', // 上传提交地址
+      data: {}, // 上传提交额外数据
+      dialogImageUrl: '', // 预览图片
+      files: [] // 上传的文件
+    }
+  },
+  computed: {},
+  created() {
+    this.dialogImageUrl = this.url
+  },
+  methods: {
+    handleChange(file, fileList) {
+      console.log(file, fileList)
+    },
+    // 上传之前处理动作
+    async handleBeforeUpload(file) {
+      const fileName = this.makeRandomName(file.name)
+      try {
+        const response = await getOssPolicy()
+
+        this.uploadUrl = response.host
+
+        // 组装自定义参数
+        if (Object.keys(response['callback-var']).length) {
+          for (const [key, value] of Object.entries(response['callback-var'])) {
+            this.data[key] = value
+          }
+        }
+
+        this.data.policy = response.policy
+        this.data.OSSAccessKeyId = response.accessid
+        this.data.signature = response.signature
+        this.data.host = response.host
+        this.data.callback = response.callback
+        this.data.key = response.dir + fileName
+      } catch (error) {
+        this.$message.error('获取上传配置失败')
+        console.log(error)
+      }
+    },
+    // 文件上传成功处理
+    handleSucess(response, file, fileList) {
+      const fileUrl = this.uploadUrl + this.data.key
+      this.dialogImageUrl = fileUrl
+      this.$emit('update:url', fileUrl)
+      this.files.push({
+        name: this.data.key,
+        url: fileUrl
+      })
+    },
+    // 上传失败处理
+    handleError() {
+      this.$message.error('上传失败')
+    },
+    // 随机名称
+    makeRandomName(name) {
+      const randomStr = Math.random().toString().substr(2, 4)
+      const suffix = name.substr(name.lastIndexOf('.'))
+      return Date.now() + randomStr + suffix
+    }
+  }
+
+}
+</script>
+
+<style>
+.avatar-uploader .el-upload {
+    border: 1px dashed #d9d9d9;
+    border-radius: 6px;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+  }
+  .avatar-uploader .el-upload:hover {
+    border-color: #409EFF;
+  }
+  .avatar-uploader-icon {
+    font-size: 28px;
+    color: #8c939d;
+    width: 150px;
+    height: 150px;
+    line-height: 150px;
+    text-align: center;
+  }
+  .avatar {
+    width: 150px;
+    height: 150px;
+    display: block;
+  }
+</style>
+
+```

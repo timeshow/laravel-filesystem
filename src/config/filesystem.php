@@ -4,10 +4,10 @@ return [
         'oss'	=> [
             'driver'			=> 'oss',
             'root' => '',
-            'access_key' => env('OSS_ACCESS_KEY'),
-            'secret_key' => env('OSS_SECRET_KEY'),
-            'endpoint'   => env('OSS_ENDPOINT'), // 使用 ssl 这里设置如: https://oss-cn-beijing.aliyuncs.com
-            'bucket'     => env('OSS_BUCKET'),
+            'access_key' => env('OSS_ACCESS_KEY', ''),
+            'secret_key' => env('OSS_SECRET_KEY', ''),
+            'endpoint'   => env('OSS_ENDPOINT', ''), // 使用 ssl 这里设置如: https://oss-cn-beijing.aliyuncs.com
+            'bucket'     => env('OSS_BUCKET', ''),
             'isCName'    => env('OSS_IS_CNAME', false),
             'securityToken'		=> null,
             'timeout'           => '5184000',
@@ -17,10 +17,10 @@ return [
             // 如果有更多的 bucket 需要切换，就添加所有bucket，默认的 bucket 填写到上面，不要加到 buckets 中
             'buckets'=>[
                 'test'=>[
-                    'access_key' => env('OSS_ACCESS_KEY'),
-                    'secret_key' => env('OSS_SECRET_KEY'),
-                    'bucket'     => env('OSS_TEST_BUCKET'),
-                    'endpoint'   => env('OSS_TEST_ENDPOINT'),
+                    'access_key' => env('OSS_ACCESS_KEY', ''),
+                    'secret_key' => env('OSS_SECRET_KEY', ''),
+                    'bucket'     => env('OSS_TEST_BUCKET', ''),
+                    'endpoint'   => env('OSS_TEST_ENDPOINT', ''),
                     'isCName'    => env('OSS_TEST_IS_CNAME', false),
                 ],
                 //...
